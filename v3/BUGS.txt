@@ -1,0 +1,553 @@
+================================================================================
+ NanoAlphaPlayer v3  バグ一覧 / BUGS.txt
+================================================================================
+ 対象      : F:\opencode\mediaplayer\v3  (build\Release\NanoAlphaPlayer.exe)
+ 作成日    : 2026-10-08
+ 検出手順  : 全機能テスト 24 系統 (C:\...\Temp\opencode\v3_runall.ps1) を実行
+             し、出力を照合。UI のレイアウトは ImGui の診断ログ
+             "UI rect <tag>=l,t,r,b" を座標比較して判定している。
+             タブ / ボタンの押下可否は実マウス座標で実際に押して確認。
+ 結果      : 検出 3 件 / 修正 3 件 / 修正後の全テスト再実行で全 PASS
+              追加の v3 要件 8 項目は末尾「v3 追加要件 8 項目」を参照
+              (8 回目は全て修正済み / 全 22 系統 PASS、
+              23 系統目 = インストーラー回帰、
+              24 系統目 = ポップアウト最小化を追加)。
+
+--------------------------------------------------------------------------------
+ [BUG-001] 上部バーの URL 欄・右端ボタンがタブ列と重なっていた
+--------------------------------------------------------------------------------
+ 症状  : 診断ログの座標比較で
+             UI rect top-tab-5 = 254,160,282,182   (タブ列の右端 x=282)
+             UI rect top-url   =  36,160,976,182   (URL 欄の始点 x=36)
+         となり、URL 欄がタブ列の真下にレイアウトされていた。
+         併せて「タブ列の右端でクランプ」という保護も機能しておらず
+         (条件が rightX < 8+8 = 16 となり常に不発)、ウィンドウを
+         狭くすると右端の 4 ボタンもタブ列に重なる状態だった。
+         現状の幅ではタブが先に描画され HitTest も先勝ちだったため
+         視覚上は無傷に見えていた — 「たまたま成立していた」レイアウト。
+
+ 原因  : include/UI/ImGuiOverlay.hpp  drawTopBar() のタブ列
+             tabsEnd = ImGui::GetCursorPosX();   // ImGui::Button の直後
+         ImGui::Button() の内部で走る ItemSize() (imgui.cpp) は
+             window->DC.CursorPos.x =
+                 window->Pos.x + window->DC.Indent.x + ColumnsOffset.x
+         と「次の行の行頭」へリセットしてくる。そのため
+         GetCursorPosX() は必ず行頭 (= WindowPadding.x = 8) を返し、
+             urlX     = 8 + spacing*1.5 = 20  → 画面 x = 16 + 20 = 36
+             クランプ = rightX < 8 + 8       → 常に不発
+         となる (実測 36 と算術が完全一致)。
+         コメントに「SameLine() は毎回行頭へ戻す」とあったが、
+         行頭へ戻すのは SameLine() ではなく ItemSize() の方だった。
+
+ 修正  : SameLine() で「前ボタンの右端 + ItemSpacing」へ戻した後で
+         tabsEnd を取得するよう変更し、コメントも実態に合わせて修正。
+
+ 状態  : 修正済み — 再テスト合格
+             修正前  url left=36   (tab right=282 と重複)
+             修正後  url left=302  (tab right=282 の右、幅 674)
+                     open left=1067
+ 検証  : v3_t14_open.ps1  "--- 2. BUG-A layout ---"
+         回帰チェック: top-url / top-open が top-tab-5 の右側にあること、
+         URL 欄の幅が 180px 以上であること、修正後もタブが押せること。
+
+--------------------------------------------------------------------------------
+ [BUG-002] 「複数開く…」で再生が始まらなかった
+--------------------------------------------------------------------------------
+ 症状  : 起動直後に上部バー / ポップアウトの「複数開く…」でファイルを選ぶと、
+         リストには追加されるが再生が一切始まらない
+         (ボタンを押したのに何も起きない)。
+
+ 原因  : src/main.cpp  processUiActions() の UiAction::OpenFiles
+             const bool wasEmpty = core.vlc->playlist.empty();
+             core.vlc->playlist.addMany(paths);
+             if (wasEmpty) openInput(core, paths.front());
+         openInput() はプレイリストが空のときだけ 1 件シードするため、
+         起動直後 (シード済み) には wasEmpty が必ず false になり、
+         openInput が呼ばれない。
+         根本原因は、上部バー/ポップアウトの「複数開く…」(開いて再生)
+         と操作パネルの「ファイルを追加…」(追加だけ・再生は継続) が
+         同じ UiAction::OpenFiles を共有しており、
+         2 つの異なる操作を 1 つのハンドラで表現できていなかったこと。
+
+ 修正  : UiAction::OpenFilesPlay を新設し、「複数開く…」2 箇所
+         (上部バー kRight[1] / ポップアウト) をこれに付け替え。
+         「ファイルを追加…」は従来どおり OpenFiles (追加のみ) のまま。
+         ハンドラは両者を 1 case にまとめ、
+             OpenFilesPlay → 常に先頭の 1 件から再生を開始
+             OpenFiles     → リストが空のときだけ再生を開始
+         と分岐。リストへの追加は両方とも addMany で行う。
+
+ 状態  : 修正済み — 再テスト合格
+             input: open OK  1920x1080 ... (再生開始)
+             playlist: 2 件を追加 (計 4 件)
+ 検証  : v3_t14_open.ps1  "--- 4. BUG-B open multiple files ---"
+         (実際のファイル選択ダイアログに 2 ファイルを指定して操作)
+
+--------------------------------------------------------------------------------
+ [BUG-003] Ctrl+O / URL 欄で開いたファイルとプレイリストが同期していなかった
+--------------------------------------------------------------------------------
+ 症状  : 起動後に URL 欄 (または Ctrl+O) で別のファイルを開いた直後、
+         P (前へ) / N (次へ) が再生中ファイルと無関係な項目に飛ぶ。
+         リストが 1 件しかない状態で URL 開放すると、P は完全に無反応。
+
+ 原因  : src/main.cpp  openInput() がプレイリストを触るのは
+         「空のときだけシードする」処理のみで、index を
+         現在再生中の入力に合わせるコードが存在しなかった。
+         そのため Ctrl+O / URL で開いたファイルはリストの
+         現在位置に反映されず、Playlist::move(delta) が
+         古い index を基準に前後していた。
+
+ 修正  : tools::Playlist に setOrAdd(path) を追加
+             - 現在位置が既に一致  → 何もしない (同名 2 件でも「次へ」が
+                                      跳ね返らない)
+             - リスト内にあれば    → その番号へ移動
+             - 未登録なら          → 末尾に追加して番号を合わせる
+         openInput() の再生成功時に呼ぶよう変更し、起動時のシード処理
+         (メインと拡張ロード時の 2 箇所) も setOrAdd に統一。
+         既に index が正しい経路 (次へ/前へ/ジャンプ/終了時自動送り) では
+         現在位置が一致するため、挙動は変わらない。
+
+ 状態  : 修正済み — 再テスト合格
+             URL で small_320x180.mp4 を開く
+             → P で test_60s.mp4 (起動時シード)
+             → N で small_320x180.mp4 に戻る
+             → 複数開くで 2 件追加 → N で test_1080p_h264_aac.mp4
+ 検証  : v3_t14_open.ps1  "--- 3. BUG-C url open -> Prev -> Next ---"
+
+================================================================================
+ v3 追加要件 8 項目 — 実装内容と検証
+================================================================================
+ 対象日    : 2026-10-08
+ 結果      : 8 項目すべて実装済み / ビルド成功 / 全 20 系統テスト PASS
+ 検証      : v3_t8 (NEW-001 FSR ビューポート) / v3_t13 (NEW-003 ポップアウト) /
+             v3_t15 (NEW-007 DVD/VLC) / v3_t16 (NEW-004 音量・NEW-006 全画面) /
+             v3_tboot (NEW-005 起動 100ms) / 既存14 系統の回帰
+ 対応表    : ① FSR 画面外へ拡大される         → NEW-001
+             ② フレーム生成の精度を上げる     → NEW-002
+             ③ ポップアウト時元パネルを非表示 → NEW-003
+             ④ 音量ブーストに対応             → NEW-004
+             ⑤ 既存の FSR がガタガタ          → NEW-001
+             ⑥ 100 ms 切れを安定させる        → NEW-005
+             ⑦ 全画面時の操作バーを隠す/再表示→ NEW-006
+             ⑧ 暗号化 DVD を VLC の dll で読む → NEW-007
+             (①と⑤は同一原因のため NEW-001 にまとめて記載)
+
+--------------------------------------------------------------------------------
+ [NEW-001] FSR で画面外まで拡大されてしまう / ガタガタ (要件 ①⑤)
+--------------------------------------------------------------------------------
+ 症状  : FSR (EASU) 有効時に映像がビューポート外へはみ出し、
+         動きがカクつく・ギザギザに見える。
+ 原因  : src/Core/VideoRenderer.cpp  drawVideo() の EASU 3 パスで、
+         パス① (mainPS → 入力 RT) とパス② (EASU → 出力 RT) が
+         ビューポートを明示設定せず、既定の「ウィンドウ実寸」のまま
+         ラスタライズしていた。EASU は出力ピクセル座標を入力テクスチャ
+         座標へ写像するため、ビューポートが中間 RT の実寸より大きいと
+         「RT の外側に対応する入力領域が存在しない」マス目ができ、
+         画面外へ引き伸ばされたように見える。
+ 修正  : ViewportScope (RAII) を導入してパスごとに明示
+             パス全体 : RT 実寸
+             パス①    : m_fsrSrcW x m_fsrSrcH (映像の実寸)
+             パス②    : m_fsrDstW x m_fsrDstH (表示矩形の実寸)
+             RCAS     : 出力 RT 実寸 (定数 con.x は無変更)
+ 状態  : 修正済み — 再テスト合格
+             VideoRenderer: FSR viewport easu=320x180 -> 948x533 (rt=1408x792)
+             (修正前は pass① が rt=1408x792 でラスタライズされていた)
+ 検証  : v3_t8_settings.ps1  phase B
+             - pass1 ビューポート = 映像ソース実寸 (320x180)
+             - pass1 ビューポート ≠ ウィンドウ実寸
+             - pass2 ビューポート = 表示矩形 (ソースより大きい)
+ ※ 実機 (NVIDIA/AMD) が無いため画質は「理論上動作する」水準 (ユーザー承知)。
+
+--------------------------------------------------------------------------------
+ [NEW-002] フレーム生成の補間が不正確だった (要件 ②)
+--------------------------------------------------------------------------------
+ 原因  : main.cpp の frameBlend() が補間重みを「表示フレーム番号 /
+         量子化係数」で求めていたため、表示レートと映像の実 pts が
+         一致しない瞬間に位相が跳ね、補間の刻みが粗くなっていた。
+ 修正  : frameBlend() を削除し、draw() の引数を float blend →
+         double mediaTime に変更。
+         VideoRenderer::interpolationWeight(mediaTime) が
+         保持している prev/curr の実 pts から連続計算する
+             w = (mediaTime - prevPts) / (currPts - prevPts)
+         (clamp 0..1、区間が異常なら EMA のフレーム間隔へフォールバック)。
+         m_prevPts は swap の直前に保存。
+         「目標倍率 N が表示フレーム数より大きいときだけ N 分割へ
+         量子化する」ようにし、そうでない場合は連続補間のまま。
+         ディスプレイ間隔は draw() 毎の steady_clock EMA (α=0.1)。
+         停止中は interpolationWeight を使わない (blendPass(1.0))。
+ 検証  : 補間の良し悪しは自動判定できないため、再生回帰 (t3/t5/t13) と
+         心拍 (frame=) で「壊れていない」ことを確認。
+
+--------------------------------------------------------------------------------
+ [NEW-003] パネルをポップアウトすると元のパネルも出たままだ (要件 ③)
+--------------------------------------------------------------------------------
+ 原因  : 上部バー / 下部バーの描画条件が「パネル非表示 + 全画面でない」
+         だけで、ポップアウトの別ウィンドウ側と二重に出ていた。
+ 修正  : chrome / showBottomBar / videoArea / subtitleBottom に
+         !m_panelWindowOpen を反映。ポップアウト中はメイン側を
+         「映像のみ」にし、映像領域からも下部バー分を削らない。
+         閉じる手段は Ctrl+H とポップアウト側の閉じるボタン。
+ 検証  : v3_t13_click.ps1  5c
+             ポップアウト開 → top-tab-1 / top-url を実クリックして
+             "UI tab ->" が出ないこと (元パネルが非表示) を確認
+             → Ctrl+P で閉じる
+
+--------------------------------------------------------------------------------
+ [NEW-004] 音量ブースト (要件 ④)
+--------------------------------------------------------------------------------
+ 仕様  : スライダー 0〜400 %、Ctrl+クリックの数値入力は上限なし、
+         100 % 超はソフトクリップで歪みを抑える。
+         キーボード ↑↓ は 0〜400 % (5 % 刻み)。
+ 修正  : AudioEngine::setVolume() の 1.0 クランプを撤廃
+         (NaN / 負 → 0、+inf のみ 1.0e6 で遮断)。
+         >1.0 のとき knee 0.7 + head*tanh のソフトクリップを追加。
+         スライダー 3 箇所 (本体 / ポップアウト / EQ) の範囲を 0..400 に。
+         OpenRGB の brightness は volume を 1.0 にクランプ (RGB 制御用)。
+         音声タブにブースト表示 +「数値入力 (上限なし)」ヒントを追加。
+ 状態  : 修正済み — 再テスト合格
+ 検証  : v3_t16_ui.ps1  1
+             ↑ を 80 回送信 → 5 % 刻みで 100 % を越え 400 % で停止
+             (実測 80 サンプル / max=400 %)
+
+--------------------------------------------------------------------------------
+ [NEW-005] 起動を 100 ms で安定させる (要件 ⑥)
+--------------------------------------------------------------------------------
+ 原因  : HLSL の D3DCompile (FSR / 本体シェーダ) が初回に約 90 ms を占め、
+         100 ms 予算の大半を消費していた。
+ 修正  : コンパイル結果を %APPDATA%\NanoAlphaPlayer\shaders.bin へ
+         ディスクキャッシュする (FNV-1a のソースハッシュ +
+         magic 0x53474541 + version 3 + フラグ 3bit)。
+ 状態  : 修正済み — 再テスト合格
+             Phase 1 boot: 89〜92 ms → 56〜59 ms  (render=1〜2 ms)
+ 検証  : v3_tboot.ps1  3 回起動して Phase 1 boot を抽出し
+         「3 回中 2 回以上が 100 ms 未満」を要求 (実測 3/3 = 56〜59 ms)。
+ ※ 初回の冷起動のみ 508 ms (うち D3D11CreateDevice 401 ms / window 164 ms)。
+   ドライバと AV スキャナのコストで制御不可のため予算対象外。
+
+--------------------------------------------------------------------------------
+ [NEW-006] 全画面中の下部操作バーが再表示されない (要件 ⑦)
+--------------------------------------------------------------------------------
+ 修正  : 下部バーの再表示条件にマウスのクリックを追加
+         (既存: マウス移動 / キー押下)。停止・シーク・画面クリックで
+         4 秒間だけバーを出す挙動を維持しつつ、非表示→表示の遷移を
+             UI fullscreen bar -> hidden
+             UI fullscreen bar -> revealed by click
+         として 1 回だけ記録するよう変更。
+ 状態  : 修正済み — 再テスト合格
+ 検証  : v3_t16_ui.ps1  2
+             F11 → 4 秒経過で hidden
+             カーソル移動なしのクリック → revealed by click (1 回のみ)
+             右矢印 (シーク) → 再び hidden (計 2 回) → F11 で復帰
+
+--------------------------------------------------------------------------------
+ [NEW-007] 暗号化 DVD を VLC の dll で読めるようにする (要件 ⑧)
+--------------------------------------------------------------------------------
+ 方針  : 「DVD を読み込んで暗号化を検知したら VLC の dll を読み込んで
+         再生する」(ユーザー確認済み)。暗号が無ければ従来どおり
+         FFmpeg 経路を使い、既存コードは変更しない。
+ 検出  : src/Extensions/VlcVideo.cpp  detectDvd()
+             VIDEO_TS ディレクトリ / .IFO / .VOB / .ISO / ドライブルートを判定
+             VIDEO_TS 内の VTS_xx_1.VOB の先頭 64 セクタ (2048 B) に
+             MPEG-PS パックヘッダ 00 00 01 BA が 1 つでもあれば暗号なし、
+             1 つも無ければ CSS スクランブルとみなす。
+             .ISO は中身を読めないため「判定不能 → VLC」扱い。
+             判定不能 (読めない等) のときは FFmpeg 経路へフォールバック。
+ ロード  : findLibvlc() が HKLM/HKCU の Software\VideoLAN\VLC InstallDir →
+           標準インストールパスの順に libvlc.dll を探し、
+           LoadLibraryExW(LOAD_WITH_ALTERED_SEARCH_PATH) で読む
+           (libvlccore.dll / plugins\ を同ディレクトリ基準で解決)。
+           必要シンボル 20 個を GetProcAddress で動的解決。
+           無い環境では理由を明示してエラー終了 (黙って黒画面にならない)。
+ 再生  : libVLC の video callback で BGRA を「2 バッファ + mutex」で受け、
+         D3D11 テクスチャへ UpdateSubresource して既存の VideoRenderer へ
+         流し込む (UI / レターボックス / 全画面 / 字幕レイアウトはそのまま)。
+         音声は libVLC 自身の WASAPI 出力 (AudioEngine は停止)。
+ 結合  : VideoDecoder::setExternalStatus() で currentTime() / info() を
+         上書きし、UI のシークバー / 情報タブ / 終端検出をそのまま動作。
+         シーク・ポーズ・音量はレンダループでエッジ検出して libVLC へ転送。
+         'vlc:<path>' プレフィックスで強制的に VLC 経路へ切り替え可能。
+ 状態  : 実装済み — 再テスト合格
+ 検証  : v3_t15_dvd.ps1
+             1) クリアな VIDEO_TS → encrypted=no → FFmpeg 経路のまま、
+                libvlc.dll は読み込まれない
+             2) スクランブルした VIDEO_TS → encrypted=yes →
+                "dvd: encrypted -> loading the VLC dll" →
+                "VLC: libvlc.dll loaded  version=3.0.24" →
+                "VLC: media attached" → "input: open ... (libVLC)"
+                (合成ディスクなので再生自体は失敗するが、検出 → 読込
+                → エラー報告の経路は成立している)
+             3) vlc:test_60s.mp4 → "input: open OK (libVLC)" →
+                Space "Shortcut: pause (libVLC)" →
+                右矢印 "VLC: seek ->" → Space "Shortcut: resume (libVLC)"
+             4) 3 実行とも FATAL なし
+ ※ 暗号化 DVD の実物は無いため、検出 → ロード → 再生経路は合成データで
+   確認。CSS 復号そのものは libVLC (内蔵 libdvdcss) に委ねる。
+
+--------------------------------------------------------------------------------
+ [NEW-008] ポップアウトの「全画面」が同名ボタン 2 つで ImGui が警告
+--------------------------------------------------------------------------------
+ 症状  : パネル (NanoAlphaPlayer Popout) の「全画面」ボタンにカーソルを乗せると
+          ImGui の "Programmer error: N visible items with conflicting ID!"
+          という警告が出る (io.ConfigDebugHighlightIdConflicts)。
+ 原因  : 同じ "NanoAlphaPlayer Popout" ウィンドウの中に 2 つ存在した。
+          drawTransport()   → Button("全画面")      (noteRect panel-full)
+          drawPanelWindow() → SmallButton("全画面") (noteRect panel-full2)
+          同じラベル = 同じ ImGuiID になるため、ホバー / 押下状態も
+          2 つで共有されてしまう実害もあった。
+ 修正  : ヘッダ側 (panel-full2) を PushID("panel_header_fs") で ID シードだけ
+          分離した。ラベルは変えないのでレイアウトと noteRect の座標は不変。
+          (下部バーの「全画面」は別ウィンドウなので ID 根が違い影響なし)
+ 追加  : ImGui の検出結果を 1 行ログ化した。ツールチップはホバーしないと
+          目に入らないため、自動検証できるようにしたもの。
+              UI: id conflict <id>  hoveredItems=N
+ 状態  : 修正済み — 再テスト合格
+ 検証  : v3_t17_fps.ps1  下部バーとポップアウトの各ボタンを実マウスで
+          ホバリングし、"UI: id conflict" が 0 件であることを確認。
+
+--------------------------------------------------------------------------------
+ [NEW-009] fps が上がらない (フレーム生成 / 高フレームレート素材)
+--------------------------------------------------------------------------------
+ 症状  : 30/60/120/240fps 比較クリップで見たフレームレートが常に 60 fps で、
+          フレーム生成を有効にしても変化しなかった。
+ 原因  : 描画レートを GetDeviceCaps(VREFRESH) の固定値 (60 Hz) でスリープ
+          していた。コンテンツ fps もフレーム生成も一切反映されない。
+          さらに Windows の既定タイマ分解能は 15.6 ms で、サブ 16 ms の
+          スリープは物理的に合わない。
+ 修正  : 1) ソースの瞬間フレームレートを VideoDecoder のデコードスレッドが
+              publishFrame() (= コンテンツ順の全フレーム) で測る EMA を追加。
+              描画レートから測ると「描画が遅い → 測定値も下がる」という
+              自己制限 (フィードバック) になるため、描画に依存しない位置で測る。
+          2) target = clamp(source x (frameGen ? factor : 1), refresh, 500)
+              を毎フレーム再計算する。変化時のみ
+              main: present target -> 120 Hz  source=30 fps  frameGen=on x4
+              をログする (1 Hz 以下の揺らぎはログしない)。
+          3) timeBeginPeriod(1) でタイマ分解能を 1 ms にし、
+              「Sleep で粗く待ち + 残りを QPC スピン」で待つ方式に変更。
+ 参考  : オンライン仕様の確認
+          - Present は syncInterval=0 で呼んでいるため、DWM 合成下でも
+            リフレッシュレートを超えて呼び出せる (画面には最新フレームが
+            出る)。レートを決めていたのは自前のスリープだけだった。
+          - 画面が 60 Hz なら 120/240 fps 素材でも 60 fps にしか見えない
+            のが物理的上限。Present 自体は上げられる。
+          - testdata\fps_30_60_120_240.webm は実測 30.0 fps の CFR (全区間)。
+            タイトルの 60/120/240 は映像内で比較している内容の話で、
+            コンテナのフレームレートではない (source= で実測)。
+ 状態  : 修正済み — 再テスト合格
+ 検証  : v3_t17_fps.ps1
+              フレーム生成 OFF → 60 fps (リフレッシュ相当)
+              フレーム生成 ON (factor 4) → 120 fps
+              factor 8 の検証実行 → 240 fps を 16 秒間安定維持
+              (239.8〜240.3 fps / main: present target -> 240 Hz)
+              RTSS の OSD 表示 (60 / 120 / 240 FPS) とも一致する。
+
+--------------------------------------------------------------------------------
+ 回帰テストの登録 (v3_runall.ps1 — 計 24 系統)
+--------------------------------------------------------------------------------
+ 追加:
+   v3_t13_click.ps1  実マウスで全 UI を叩く
+                      (上部タブ 6 / URL 欄 / キーショートカット 13 種 +
+                       Ctrl+H + F11 / 下部バー ポップ・再生・リピート・EQ /
+                       パネル非表示復帰 / ポップアウト開閉 +
+                       ポップアウトのタブ 6 + ポップアウト側操作 +
+                       ポップアウト中の元パネル非表示)
+   v3_t14_open.ps1   本ファイル掲載の 3 バグの回帰
+                      (レイアウト座標 / Prev-Next の同期 / 複数開く)
+   v3_t15_dvd.ps1    暗号化 DVD の検出と VLC バックエンド (NEW-007)
+   v3_t16_ui.ps1     音量ブースト 400 % と全画面操作バー (NEW-004/006)
+   v3_t17_fps.ps1    フレームレートと重複 ID の診断 (NEW-008/009)
+   (23 系統目) installer/test_installer.ps1  配布用インストーラー回帰 (変更 5)
+   (24 系統目) v3_t24_popmin.ps1             ポップアウトの最小化 (変更 7)
+
+--------------------------------------------------------------------------------
+ テストで出たが仕様どおりのもの (バグに数えない)
+--------------------------------------------------------------------------------
+ - 字幕 test_60s.srt の cue1 は 1〜10 秒のため、t=10.8 秒付近で字幕が
+   消えるのは正しい。
+ - 再生タブのリピート行がドック右端で切れて見えるのは、幅が足りない
+   場合に TextDisabled が折り返さずはみ出すだけで機能には影響しない。
+ - NVIDIA / AMD の実機は手元に無いため、FSR とハードウェアデコードは
+   「理論上動作する」水準での確認 (ユーザー承知の条件)。
+ - OpenRGB の ACK タイムアウトは不安定だが、機能検証には影響しない。
+ - MSI Afterburner / RTSS の OSD は D3D11 の交換鎖に直接描画されるため、
+   v3_t9_video_area.ps1 の「動画領域に白ピクセルが無い」判定に OSD の文字
+   (実測 約 400 px / client 91,255 - 211,269) が混入して FAIL になる。
+   アプリ側の描画・動画そのものは正常で、他の全チェックは PASS。
+   ユーザー判断により「RTSS / MSIAfterburner / RTSSHooksLoader64 のプロセスを
+   検出したときだけ」判定のしきい値を 40 → 1500 (dock は 50 → 1500) へ緩める
+   実装にして、Afterburner が無い環境では従来どおり 40 のまま厳格に見る。
+   (パネル / ウォーターマークが動画に重なると数万 px になるため判定力は維持)
+ - 同 v3_t9_video_area.ps1 の「非表示時も動画が描かれている」判定も併せて
+   修正した (アプリ側の描画は正常で変更していない)。旧来は client
+   (480,380) 120x120 の平均彩度 > 80 で見ていたが、非表示状態のレイアウト
+   ではその位置がテストパターンの灰色バーにちょうど当たり平均 69 程度に
+   なり、映像は正しく描画されているのに FAIL になる。スクリーンショット
+   を拡大して確認済みで、OSD が偶然そこに重なった回だけ 94 で通っていた
+   (回帰によって 69 / 94 / 120 と揺れていたのはこのため)。
+   → クライアント (480,380)-(1080,680) の「彩度 > 96 のピクセル数 > 5000」
+   で判定するように変更した (実測 約 15 万 px)。灰色バーの位置にも
+   OSD の有無にも依存せず、3 回連続で PASS を確認。
+
+--------------------------------------------------------------------------------
+ 製品名の変更 / OpenRGB 既定無効 / ライセンス公開準備 (NanoAlphaPlayer)
+--------------------------------------------------------------------------------
+ 変更 1: 製品名を NanoAlphaPlayer へ変更
+   - ウィンドウタイトル "NanoAlphaPlayer" / "NanoAlphaPlayer EQ" /
+     "NanoAlphaPlayer Popout"、ウィンドウクラス、exe 名
+     (NanoAlphaPlayer.exe)、ログ接頭辞 [NanoAlphaPlayer]、
+     %APPDATA%\NanoAlphaPlayer、OpenRGB のクライアント名、
+     CMake の project / add_executable をすべて新名に揃えた。
+   - ソース内部も一括で変更した (namespace aegis -> nanoalpha、
+     マクロ AEGIS_ -> NANOALPHA_、コメントおよびテストスクリプト含む)。
+   - 旧 %APPDATA%\AegisPlayer から settings.ini と shaders.bin を手動で
+     移した (シェーダーキャッシュが無いと tboot の 100 ms 予算を割るため。
+     移動は 1 回のみで移行コードは入れていない)。
+ 変更 2: OpenRGB 連携の既定を OFF にした
+   - Settings::Values::extRgb の既定 true -> false。
+     起動ログは "Phase 2: ext.rgb -> disabled by settings" と
+     "Phase 2: loaders registered=4 skipped=1"。有効化は拡張タブの
+     チェックボックスから行う。v3_t10_ui.ps1 は新既定に合わせて
+     "-> enabled" / "ext.rgb=1" に更新した。
+ 変更 3: 同梱ライブラリのライセンスをアプリ内に表示するようにした
+   - include/Core/Licenses.hpp に FFmpeg (LGPL-3.0) / Dear ImGui (MIT) /
+     FidelityFX FSR (MIT) のライセンス本文を取り込み、OpenRGB・libVLC・
+     Windows SDK は識別情報と利用形態 (動的リンク / 実行時ロード /
+     非同梱) を併記した。
+   - F1 または情報タブの「ライセンス表示 (F1)」で開閉する。
+     診断ログは "licenses window -> opened|closed" と
+     "UI rect lic-open=l,t,r,b" (窓が実際に描画された証跡)。
+   - CMake の POST_BUILD で LICENSE と THIRD_PARTY_LICENSES.md を
+     exe と同じ場所へコピーする。
+ 変更 4: リポジトリ直下に README.md / LICENSE (GPL-3.0) /
+         THIRD_PARTY_LICENSES.md を追加した (FFmpeg の LGPL-3.0 と
+         FSR / ImGui の MIT が GPLv3 と互換なこと、FFmpeg のソースを
+         請求可能であることを明記)。
+ 検証  : v3_t18_licenses.ps1 (21 系統目) — F1 の開閉 / 窓の実描画
+         (UI rect lic-open) / ヘルプ行 / 既定値 / ID 衝突ゼロ = 全 PASS。
+ 留意  : CMake のオプション名を変えると CMakeCache の既存値は引き継がれない。
+         今回は旧 AEGIS_CONSOLE=ON が NANOALPHA_CONSOLE=OFF に落ちて
+         ログが出力されず全テストが一斉に落ちた。
+         cmake -B build -DNANOALPHA_CONSOLE=ON で復元して解決した。
+
+================================================================================
+
+--------------------------------------------------------------------------------
+ 変更 5: 配布用インストーラー (MSI) を追加した
+--------------------------------------------------------------------------------
+ 変更内容:
+   - WiX Toolset v5 (dotnet tool) で per-user の MSI を作る構成にした。
+     installer/installer.wxs に定義、installer/build_installer.ps1 が
+     ライセンス文書の RTF 化・拡張の追加・wix build を一括で行う。
+     成果物は dist/NanoAlphaPlayer-<version>-x64.msi。
+   - 配布ビルドを別ツリー build-pkg にするようにした
+     (-DNANOALPHA_CONSOLE=ON -DNANOALPHA_CONSOLE_WINDOW=OFF
+      -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded)。
+     テストはログ (stdout) が必須だが、ユーザーにはコンソール窓を出したくない
+     ため、ログの出力 (NANOALPHA_CONSOLE) とサブシステム (NANOALPHA_CONSOLE_WINDOW)
+     を別オプションに分離した。GUI サブシステムでも stdout ハンドリは
+     引き継がれるのでパイプで起動すればログが読める (実測 4221-51 行)。
+     /MT なので VC 再頒布パッケージにも依存しない。
+   - アプリアイコンと VERSIONINFO を resources/nanoalphaplayer.ico /
+     resources/app.rc で追加した (make_icon.ps1 が PNG 込み ICO を生成)。
+   - 同梱ランタイムは exe が実際に import する 5 DLL のみに絞った
+     (avformat-63 / avcodec-63 / avutil-61 / swresample-7 / swscale-10)。
+     avdevice-63 / avfilter-12 と ffmpeg.exe / ffplay.exe / ffprobe.exe は
+     未使用なので除外した (ffplay だけで 18 MB)。
+   - installer/test_installer.ps1 を追加 (23 系統目)。
+
+ 留意点 1: per-user と per-machine の切り分け
+   - per-machine (Program Files + HKLM) にすると管理者権限が無い環境では
+     エラー 1603 で必ず失敗する (実測)。UAC が一切不要な per-user を採用した。
+   - WiX の Package/@Scope は perUser / perMachine / perUserOrMachine の3種。
+     perUserOrMachine は ALLUSERS=2 + MSIINSTALLPERUSER=1 になるが、
+     MSI ドキュメントのとおり MSIINSTALLPERUSER は ALLUSERS が 2 のとき
+     にしか効かない。WiX は Property/@Value に空文字列を入れてくれない
+     (WIX0006) ので、ALLUSERS="" による per-user の明示は authoring できない。
+   - StandardDirectory の候補に CommonDesktopFolder は無い (WIX0021)。
+     使う場合は素の <Directory Id="CommonDesktopFolder" /> で参照する。
+
+ 留意点 2: per-user なのに ARP エントリが HKLM に出ていた
+   - Scope="perUser" で入れると配置先もレジストリ (HKCU/HKCR) も
+     ユーザー側に正しく書かれるのに、Windows Installer が作る
+     「プログラムの追加と削除」キーだけが
+     HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall に
+     出てしまう (実測)。このままだとアンインストール時に UAC が出る。
+   - そこで ARPSYSTEMCOMPONENT=1 で Windows Installer 自身のエントリを
+     非表示にし (キー自体は作られるが ARP には出ない)、HKCU に完全版
+     (DisplayName / Publisher / DisplayVersion / DisplayIcon /
+      InstallLocation / UninstallString / NoModify / EstimatedSize) を
+     インストーラーが直接書く構成にした。アンインストール文字列は
+     MsiExec.exe /X{ProductCode} で UAC なしに消える。
+   - ProductCode を固定しないとビルドのたびに別の製品として扱われ、
+     前版が残ったままになる (/x が 1605 = 製品が見つからない)。
+     0.1.0 は ProductCode="{5C9E2B41-7D08-4A63-9E15-2F6C8B4D7A90}" で固定した。
+
+ 留意点 3: WiX のその他の罠
+   - XML コメントに "--" を書けない (={3,} に置換した)。
+   - 属性の中で <?echo $(var.Ext)?> は使えない → $(var.Ext) を直書きする。
+   - Package に InstallScope / Platform 属性はない
+     → Scope="perUser" と CLI の -arch x64 で指定する。
+   - MajorUpgrade に AllowDowngrade はない。
+   - 標準ディレクトリは Directory ではなく StandardDirectory。
+   - CustomAction の FileKey ではなく FileRef。
+   - 出力オプションは -out (-output は不可)。
+   - <?foreach?> はセミコロン区切り (カンマ区切りだと1回だけ回る)。
+   - バージョン情報を持つ DLL が複数入るコンポーネントは Guid="*" を使えない
+     (WIX0368) → ファイル群ごとにコンポーネントを分け明示 GUID を振る。
+   - UI は <UIRef Id="WixUI_Mondo" /> ではなく
+     <ui:WixUI Id="WixUI_Mondo" InstallDirectory="INSTALLDIR" />。
+     UIRef だと WIX0094 (protection level) で落ちる。
+
+ 検証  : installer/test_installer.ps1 → インストール (UAC なし) /
+         配置ファイル 11 種 / スタートメニュー + デスクトップの
+         ショートカット / 関連付け 30 拡張子 (OpenWithProgids +
+         Capabilities + RegisteredApplications) / ARP エントリ /
+         同梱バイナリの起動 (コンソール窓ゼロ・ログ取得・正常終了) /
+         アンインストール → 残存ゼロ = 全 PASS。
+ 変更 6: 失われていたタブ回帰テスト 2 本を復元した
+--------------------------------------------------------------------------------
+   - v3_t11_tabs.ps1 / v3_t11b_tabs.ps1 がハーネスから欠落しており、実行すると
+     "パラメーター 'File' には存在しないパスを指定してください" で
+     exit=-196608 になっていた。残っていたアプリログ (v3t11.log /
+     v3t11b.log) から挙動を特定して作り直した。
+   - t11 : 数字キー 1-6 がタブ 0-5 に切り替わることを "UI tab -> <name>
+     (idx=N)" で判定。タブバーと URL 欄が重ならないこと (BUG-001 の
+     再発防止) も併せて検査する。
+   - t11b: Tab で ImGui のナビゲーション層に入り navIdAlive=1 になること、
+     連打で複数のウィジェットにフォーカスが移ることを "UI nav:" 行で判定。
+     矢印キーはショートカット (seek +5 s) に取られるので移動には使わない。
+   - 復元時の大勝因 2 つ:
+     (a) ログを Get-Content で読みながら待つと、読み取り側がファイルを
+         FILE_SHARE_WRITE なしで開いているためプレイヤーの stdout 書き込みが
+         停滞し、「UI tab」行が読み取り終了と同時にしか出ない (待つほど
+         遅くなる)。共有読み書きで開くようにした。
+     (b) 選択中のタブへの再選択はログが出ない (selectTab() が m_tab の
+         変化時のみ記録する)。起動直後はタブ 0 のため、最初に非 0 タブへ
+         送ってから戻す順序にした。
+
+ 変更 7: ポップアウト窓を最小化できるようにした
+--------------------------------------------------------------------------------
+  症状  : ポップアウト (NanoAlphaPlayer Popout) を最小化する手段が無かった。
+          フローティング ウィンドウは ImGui の ConfigViewportsNoDecoration の
+          既定が true のため WS_POPUP (実測スタイル 0x94000000) で作られ、
+          タイトルバーが存在しない (WS_CAPTION も WS_MINIMIZEBOX も無い)。
+          OS 側の最小化ボタンは使えず、ImGui 側も NoCollapse のため
+          折りたたみ三角も無い状態だった。
+  対応  : drawPanelWindow() のヘッダ行に SmallButton("最小化") を置き、
+          minimizePanelWindow() から ShowWindow(m_panelHwnd, SW_MINIMIZE)
+          を呼ぶ。m_panelHwnd は毎フレーム末尾の captureViewportHwnd() が
+          前フレーム時点で確定済みなので、ユーザーが押せる時点では必ず有効。
+          既に IsIconic なら何もしない (二重最小化の回避)。
+          SW_MINIMIZE は SC_MINIMIZE と等価だが、自プロセスのメッセージ
+          ループへ往復する WM_SYSCOMMAND を挟まずにその場で完了する。
+    - ラベルを「ポップアウトを最小化」のままにするとヘッダ行が
+      kPopoutWidth (520 px) を超え、右端の「全画面」が画面外にはみ出した
+      (実測 panel-full2=1873,196,1925,212)。行幅に収まるよう「最小化」に
+      畳んだ (noteRect のタグ panel-min は変更なし)。補足はツールチップで。
+    - ImGui のウィンドウ内に置くため、タイトルバーが無い縁なし窓でも常に
+      見える。ポップアウトの閉じるボタンと同じ行に並ぶ。
+  検証  : v3_t24_popmin.ps1 (24 系統目) を追加:
+          開く → スタイル確認 → ボタン押下で IsIconic が立つこと →
+          最小化中もメイン窓が生きていること → 復元後にタブ操作が効くこと →
+          SW_MINIMIZE / SW_RESTORE の素通し → 閉じる → FATAL 無し = 全 PASS。
+          回帰として v3_t13_click / v3_t17_fps も再実行して全 PASS。
+================================================================================

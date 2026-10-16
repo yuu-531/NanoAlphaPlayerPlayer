@@ -1,0 +1,358 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ===========================================================================
+   NanoAlphaPlayer - WiX v5 インストーラー定義
+
+    配布物   : v3\dist\NanoAlphaPlayer-<version>-x64.msi
+    ビルド   : v3\installer\build_installer.ps1
+    構築ツール: WiX Toolset v5 (dotnet tool: wix) + WixToolset.UI
+
+    方針
+      * 当前ユーザーへインストール (per-user)。管理者権限 (UAC) を要求しない。
+        配布先: %LOCALAPPDATA%\Programs\NanoAlphaPlayer
+      * アンインストーラーはインストールしたファイルと関連付けだけを消去し、
+        ユーザーデータ (%APPDATA%\NanoAlphaPlayer) は残す。
+      * 関連付けは「常に登録するもの (OpenWithProgids / 既定アプリ候補)」と
+        「チェックボックスで選べるもの (既定プログラムとして割り当てる)」に分ける。
+        Windows 10/11 では既定アプリの最終決定は必ずユーザーボイスで行われる。
+  ===========================================================================
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <!-- build_installer.ps1 が -d で渡す。絶対パスを前提にしている。 -->
+  <?ifndef BuildDir ?>
+    <?error BuildDir is not defined ?>
+  <?endif?>
+  <?ifndef RepoDir ?>
+    <?error RepoDir is not defined ?>
+  <?endif?>
+  <?ifndef LicenseRtf ?>
+    <?error LicenseRtf is not defined ?>
+  <?endif?>
+  <?ifndef ProductVersion ?>
+    <?define ProductVersion = "0.1.0" ?>
+  <?endif?>
+
+  <Package Name="NanoAlphaPlayer"
+           Version="$(var.ProductVersion)"
+           Manufacturer="yuu-531"
+           UpgradeCode="6F3D0A7E-2C41-4E8B-9D5A-1B7C9E4F2A30"
+           ProductCode="{5C9E2B41-7D08-4A63-9E15-2F6C8B4D7A90}"
+           Scope="perUser"
+           Language="1033"
+           Codepage="1252">
+
+    <SummaryInformation Description="NanoAlphaPlayer - Direct3D 11 media player"
+                        Manufacturer="yuu-531" />
+
+    <!-- per-user インストーラー (Scope="perUser" で ALLUSERS は設定されない)。
+         現在のユーザーへ入れるため管理者権限 (UAC) を要求しない。配置先は
+         %LOCALAPPDATA%\Programs、レジストリは HKCU/HKCR に置く。
+         per-machine (Program Files) にすると管理者権限が無ければ 1603 で失敗する
+         ため、UAC 不要の per-user を採用している。 -->
+
+    <!-- 同一 UpgradeCode の旧版を置き換える (メジャーアップグレード)。 -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!--  目錄 -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLDIR" Name="NanoAlphaPlayer" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- 現在ユーザーのスタートメニュー (per-user ではこのフォルダーが使われる)。 -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="NanoAlphaPlayer" />
+    </StandardDirectory>
+
+    <!-- 現在ユーザーのデスクトップ (per-user ではこのフォルダーが使われる)。 -->
+    <StandardDirectory Id="DesktopFolder" />
+
+    <!--  アイコン -->
+    <Icon Id="NanoAlphaPlayerIcon" SourceFile="$(var.RepoDir)\resources\nanoalphaplayer.ico" />
+
+    <!--  追加のプロパティ -->
+    <Property Id="ARPPRODUCTICON" Value="NanoAlphaPlayerIcon" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPHELPLINK"  Value="https://github.com/yuu-531" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/yuu-531" />
+
+    <!-- Windows Installer は per-user で入れた製品の「プログラムの追加と削除」
+         エントリを HKLM 側に書くことがある (配置先・レジストリは HKCU なのに
+         ARP だけ全ユーザー側に行く)。UAC なしのアンインストールを保証するため
+         Windows Installer 自前のエントリは出さず (ARPSYSTEMCOMPONENT=1)、
+         HKCU に完全版の ARP エントリを自分たちで書く。 -->
+    <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
+
+    <!--  UI (Mondo)
+         ようこそ → ライセンス同意 → カスタムセットアップ (機能 + 配置先) →
+         確認 → 完了 (起動チェックボックス)。 -->
+    <Property Id="WIXUI_LICENSERTF" Value="$(var.LicenseRtf)" />
+    <Property Id="WIXUI_EXITDIALOGANIMALICHECKBOX" Value="1" />
+    <Property Id="WIXUI_EXITDIALOGANIMALICHECKBOXTEXT" Value="Launch NanoAlphaPlayer" />
+    <ui:WixUI Id="WixUI_Mondo" InstallDirectory="INSTALLDIR" />
+
+    <!-- 完了ダイアログの「起動する」チェックボックスから呼ばれる。 -->
+    <CustomAction Id="LaunchApplication"
+                  FileRef="NanoAlphaPlayerExe"
+                  ExeCommand=""
+                  Return="asyncNoWait" />
+
+    <!--  関連付ける拡張子
+         既定プログラムとしての割り当て (FileAssociations 機能) と、
+         「プログラムから開く / 既定アプリ候補」への登録 (常に有効) を分ける。 -->
+    <?define VideoExts = "mp4;mkv;avi;mov;webm;wmv;flv;m4v;mpg;mpeg;ts;m2ts;mts;3gp;ogv;vob;mxf;rmvb" ?>
+    <?define AudioExts = "mp3;flac;wav;m4a;aac;opus;wma;ogg;weba;aiff;ape;ac3" ?>
+
+    <!-- ======================================================== コンポーネント -->
+
+    <!-- 本体 (実行ファイル + FFmpeg ランタイム + FSR ヘッダー + ライセンス文書)
+         バージョン情報を持つ DLL が複数入るコンポーネントは自動 GUID を使えない
+         (WIX0368) ので、ファイル群ごとにコンポーネントを分け明示 GUID を振る。 -->
+    <Component Id="MainExecutable" Directory="INSTALLDIR" Guid="B7E1A6C4-3F52-4A91-9C0D-5E82F1A74B31">
+      <File Id="NanoAlphaPlayerExe" Source="$(var.BuildDir)\NanoAlphaPlayer.exe" KeyPath="yes" />
+    </Component>
+
+    <Component Id="FfmpegRuntime" Directory="INSTALLDIR" Guid="C8F2B7D5-4063-4B02-8D1E-6F93A2B85C42">
+      <File Id="avformat63" Source="$(var.BuildDir)\avformat-63.dll" KeyPath="yes" />
+      <File Id="avcodec63"  Source="$(var.BuildDir)\avcodec-63.dll" />
+      <File Id="avutil61"   Source="$(var.BuildDir)\avutil-61.dll" />
+      <File Id="swresample7" Source="$(var.BuildDir)\swresample-7.dll" />
+      <File Id="swscale10"  Source="$(var.BuildDir)\swscale-10.dll" />
+    </Component>
+
+    <Component Id="FsrHeaders" Directory="INSTALLDIR" Guid="D903C8E6-5174-4C13-9E2F-70A4B3C96D53">
+      <!-- シェーダーの FileInclude で実行時に読み込まれるため必須。 -->
+      <File Id="ffxA"    Source="$(var.BuildDir)\ffx_a.h" KeyPath="yes" />
+      <File Id="ffxFsr1" Source="$(var.BuildDir)\ffx_fsr1.h" />
+    </Component>
+
+    <Component Id="LicenseDocuments" Directory="INSTALLDIR" Guid="EA14D9F7-6285-4D24-AF30-81B5C4DA7E64">
+      <!-- GPLv3: 配布物にライセンス全文と第三者ライセンスを同梱する。 -->
+      <File Id="LicenseDoc"    Source="$(var.RepoDir)\..\LICENSE" KeyPath="yes" />
+      <File Id="ThirdPartyDoc" Source="$(var.RepoDir)\..\THIRD_PARTY_LICENSES.md" />
+    </Component>
+
+    <!-- スタートメニューショートカット -->
+    <Component Id="StartMenuShortcut" Directory="ApplicationProgramsFolder" Guid="*">
+      <Shortcut Id="ApplicationStartMenuShortcut"
+                Name="NanoAlphaPlayer"
+                Description="NanoAlphaPlayer media player"
+                Target="[INSTALLDIR]NanoAlphaPlayer.exe"
+                WorkingDirectory="INSTALLDIR"
+                Icon="NanoAlphaPlayerIcon" />
+      <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\NanoAlphaPlayer"
+                     Name="StartMenuShortcut"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- デスクトップショートカット -->
+    <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="*">
+      <Shortcut Id="ApplicationDesktopShortcut"
+                Name="NanoAlphaPlayer"
+                Description="NanoAlphaPlayer media player"
+                Target="[INSTALLDIR]NanoAlphaPlayer.exe"
+                WorkingDirectory="INSTALLDIR"
+                Icon="NanoAlphaPlayerIcon" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\NanoAlphaPlayer"
+                     Name="DesktopShortcut"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- 「プログラムの追加と削除」 (設定 > アプリ) のエントリ。
+         ARPSYSTEMCOMPONENT=1 で Windows Installer が作る HKLM 側のエントリを
+         止めているので、こちらが唯一の表示元になる。アンインストール文字列は
+         msiexec /x で per-user アンインストールを実行する。 -->
+    <Component Id="AddRemovePrograms" Directory="INSTALLDIR" Guid="8B25C0D6-A497-4B35-8F40-91C7D5E6AB81">
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoAlphaPlayer"
+                     Name="DisplayName"
+                     Type="string"
+                     Value="NanoAlphaPlayer"
+                     KeyPath="yes" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoAlphaPlayer"
+                     Name="DisplayVersion"
+                     Type="string"
+                     Value="$(var.ProductVersion)" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoAlphaPlayer"
+                     Name="Publisher"
+                     Type="string"
+                     Value="yuu-531" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoAlphaPlayer"
+                     Name="DisplayIcon"
+                     Type="string"
+                     Value="[INSTALLDIR]NanoAlphaPlayer.exe,0" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoAlphaPlayer"
+                     Name="InstallLocation"
+                     Type="string"
+                     Value="[INSTALLDIR]" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoAlphaPlayer"
+                     Name="UninstallString"
+                     Type="string"
+                     Value="MsiExec.exe /X{5C9E2B41-7D08-4A63-9E15-2F6C8B4D7A90}" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoAlphaPlayer"
+                     Name="NoModify"
+                     Type="integer"
+                     Value="1" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoAlphaPlayer"
+                     Name="NoRepair"
+                     Type="integer"
+                     Value="1" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoAlphaPlayer"
+                     Name="URLInfoAbout"
+                     Type="string"
+                     Value="https://github.com/yuu-531" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoAlphaPlayer"
+                     Name="EstimatedSize"
+                     Type="integer"
+                     Value="42800" />
+    </Component>
+
+    <!-- ProgId: 全拡張子が共通で使う「NanoAlphaPlayer.MediaFile」 -->
+    <Component Id="MediaFileProgId" Directory="INSTALLDIR" Guid="*">
+      <RegistryValue Root="HKCR"
+                     Key="NanoAlphaPlayer.MediaFile"
+                     Type="string"
+                     Value="NanoAlphaPlayer media file"
+                     KeyPath="yes" />
+      <RegistryValue Root="HKCR"
+                     Key="NanoAlphaPlayer.MediaFile\DefaultIcon"
+                     Type="string"
+                     Value="[INSTALLDIR]NanoAlphaPlayer.exe,0" />
+      <RegistryValue Root="HKCR"
+                     Key="NanoAlphaPlayer.MediaFile\shell\open\command"
+                     Type="string"
+                     Value="&quot;[INSTALLDIR]NanoAlphaPlayer.exe&quot; &quot;%1&quot;" />
+    </Component>
+
+    <!-- 既定アプリ候補 (Settings &gt; アプリ &gt; 既定のアプリ) に名前が出るようにする。
+         「プログラムから開く」メニューにも常時並ぶ。 -->
+    <Component Id="RegisteredApplications" Directory="INSTALLDIR" Guid="*">
+      <RegistryValue Root="HKCU"
+                     Key="Software\RegisteredApplications"
+                     Name="NanoAlphaPlayer"
+                     Type="string"
+                     Value="Software\NanoAlphaPlayer\Capabilities"
+                     KeyPath="yes" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\NanoAlphaPlayer\Capabilities"
+                     Name="ApplicationName"
+                     Type="string"
+                     Value="NanoAlphaPlayer" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\NanoAlphaPlayer\Capabilities"
+                     Name="ApplicationDescription"
+                     Type="string"
+                     Value="Direct3D 11 media player with AMD FSR upscaling" />
+      <?foreach Ext in $(var.VideoExts)?>
+      <RegistryValue Root="HKCU"
+                     Key="Software\NanoAlphaPlayer\Capabilities\FileAssociations"
+                     Name=".$(var.Ext)"
+                     Type="string"
+                     Value="NanoAlphaPlayer.MediaFile" />
+      <?endforeach?>
+      <?foreach Ext in $(var.AudioExts)?>
+      <RegistryValue Root="HKCU"
+                     Key="Software\NanoAlphaPlayer\Capabilities\FileAssociations"
+                     Name=".$(var.Ext)"
+                     Type="string"
+                     Value="NanoAlphaPlayer.MediaFile" />
+      <?endforeach?>
+    </Component>
+
+    <!-- 拡張子ごとの OpenWithProgids (「プログラムから開く」候補への追加) -->
+    <Component Id="OpenWithProgIds" Directory="INSTALLDIR" Guid="*">
+      <RegistryValue Root="HKCU"
+                     Key="Software\NanoAlphaPlayer"
+                     Name="OpenWithProgIds"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+      <?foreach Ext in $(var.VideoExts)?>
+      <RegistryValue Root="HKCR"
+                     Key=".$(var.Ext)\OpenWithProgids"
+                     Name="NanoAlphaPlayer.MediaFile"
+                     Type="string"
+                     Value="" />
+      <?endforeach?>
+      <?foreach Ext in $(var.AudioExts)?>
+      <RegistryValue Root="HKCR"
+                     Key=".$(var.Ext)\OpenWithProgids"
+                     Name="NanoAlphaPlayer.MediaFile"
+                     Type="string"
+                     Value="" />
+      <?endforeach?>
+    </Component>
+
+    <!-- 拡張子ごとの既定プログラム割り当て -->
+    <Component Id="DefaultAssociations" Directory="INSTALLDIR" Guid="*">
+      <RegistryValue Root="HKCU"
+                     Key="Software\NanoAlphaPlayer"
+                     Name="DefaultAssociations"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+      <?foreach Ext in $(var.VideoExts)?>
+      <RegistryValue Root="HKCR"
+                     Key=".$(var.Ext)"
+                     Type="string"
+                     Value="NanoAlphaPlayer.MediaFile" />
+      <?endforeach?>
+      <?foreach Ext in $(var.AudioExts)?>
+      <RegistryValue Root="HKCR"
+                     Key=".$(var.Ext)"
+                     Type="string"
+                     Value="NanoAlphaPlayer.MediaFile" />
+      <?endforeach?>
+    </Component>
+
+    <!-- ================================================================= 機能 -->
+    <Feature Id="ProductFeature" Title="NanoAlphaPlayer" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="FfmpegRuntime" />
+      <ComponentRef Id="FsrHeaders" />
+      <ComponentRef Id="LicenseDocuments" />
+      <ComponentRef Id="AddRemovePrograms" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="MediaFileProgId" />
+      <ComponentRef Id="RegisteredApplications" />
+      <ComponentRef Id="OpenWithProgIds" />
+    </Feature>
+
+    <Feature Id="DesktopShortcutFeature"
+             Title="Desktop shortcut"
+             Description="Adds a NanoAlphaPlayer shortcut to the desktop."
+             Level="1">
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+
+    <Feature Id="FileAssociationFeature"
+             Title="File associations"
+             Description="Registers NanoAlphaPlayer as the default program for common video and audio formats. Windows will still ask for your confirmation."
+             Level="1">
+      <ComponentRef Id="DefaultAssociations" />
+    </Feature>
+
+  </Package>
+</Wix>

@@ -1,0 +1,44 @@
+// ---------------------------------------------------------------------------
+//  NanoAlphaPlayer - Win32 リソース
+//
+//  アプリアイコンと VERSIONINFO。バージョンは CMakeLists.txt の project(VERSION)
+//  と合わせて更新すること (インストーラーの版数の元にもなる)。
+//  文字列は ASCII のみ (rc.exe のコードページ依存を避けるため)。
+// ---------------------------------------------------------------------------
+#include <winver.h>
+
+#ifndef VS_VERSION_INFO
+#define VS_VERSION_INFO 1
+#endif
+
+IDI_APPICON ICON "nanoalphaplayer.ico"
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION    0,1,0,0
+    PRODUCTVERSION 0,1,0,0
+    FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+    FILEFLAGS      0x0L
+    FILEOS         VOS_NT_WINDOWS32
+    FILETYPE       VFT_APP
+    FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0" // en-US / Unicode
+        BEGIN
+            VALUE "CompanyName",      "yuu-531"
+            VALUE "FileDescription",  "NanoAlphaPlayer media player"
+            VALUE "FileVersion",      "0.1.0.0"
+            VALUE "InternalName",     "NanoAlphaPlayer"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 yuu-531. Licensed under GPL-3.0."
+            VALUE "OriginalFilename", "NanoAlphaPlayer.exe"
+            VALUE "ProductName",      "NanoAlphaPlayer"
+            VALUE "ProductVersion",   "0.1.0.0"
+        END
+    END
+
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200 // en-US, Unicode
+    END
+END

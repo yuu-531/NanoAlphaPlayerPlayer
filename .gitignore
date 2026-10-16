@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+#  NanoAlphaPlayer - repository ignore rules
+#
+#  This repository carries the current version (v3): sources, the bundled
+#  third-party SDKs (FFmpeg / Dear ImGui / FidelityFX FSR), the WiX installer
+#  definition and the documentation. Rebuild artefacts, the packaged drop and
+#  the local test media are produced locally and are not tracked.
+# ---------------------------------------------------------------------------
+
+# CMake / MSVC build trees
+v3/build/
+v3/build-pkg/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.dir/
+x64/
+Win32/
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# generated installer artefacts (rebuild with v3\installer\build_installer.ps1)
+v3/dist/
+v3/installer/License.rtf
+*.wixpdb
+*.cab
+
+# local test media (large binaries, not part of the source drop)
+v3/testdata/
+
+# runtime / test litter
+*.log
+imgui.ini
+settings.ini
+shaders.bin
+crashdumps/
+__pycache__/
